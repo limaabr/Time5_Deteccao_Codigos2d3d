@@ -50,13 +50,13 @@ except ImportError:
 
 # ==================== CONFIGURAÇÕES OTIMIZADAS PARA PCYES FHD-03 ====================
 DEFAULT_CONFIG = {
-    "auto_exposure": True,      # ✅ MUDADO: Ativa auto exposição por padrão
+    "auto_exposure": True,      # Ativa auto exposição por padrão
     "exposure": -6,
     "gain": 0,
     "brightness": 128,
-    "contrast": 40,             # ✅ AJUSTADO: Aumentado para melhor nitidez
+    "contrast": 40,             
     "gamma": 100,
-    "auto_focus": True,         # ✅ MANTIDO: Autofoco ativo por padrão
+    "auto_focus": True,         # Autofoco ativo por padrão
     "focus": 0,
     "boost": False,
     "alpha": 1.0,
@@ -388,9 +388,9 @@ class CameraThread(QThread):
                 
                 # Adiciona informações na tela
                 cv2.putText(display_frame, f"Detectados: {detected_count}/{self.expected_codes}",
-                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (106, 90, 205), 2)
                 cv2.putText(display_frame, f"Tempo: {elapsed:.1f}s / {self.timeout}s",
-                           (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                           (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (106, 90, 205), 2)
                 
                 # Aguarda timeout completo
                 if elapsed >= self.timeout:
