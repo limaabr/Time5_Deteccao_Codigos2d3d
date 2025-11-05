@@ -83,6 +83,7 @@ class CameraThread(QThread):
         self.detected_codes = set()
         self.frame_skip = 1
         self.frame_count = 0
+        self.thumbnail_mode = "Enhanced (CLAHE)"  # Default
         
         # Controle de parâmetros (thread-safe)
         self.pdi_params = DEFAULT_CONFIG.copy()
@@ -198,97 +199,331 @@ class CameraThread(QThread):
         """Para o ciclo de inspeção"""
         self.inspecting = False
         print("⏹️ Inspeção parada manualmente")
+
+    def is_valid_code(self, code_type: str, code_data: str, bbox: tuple) -> bool:
+        """Valida se o código detectado é legítimo (não é ruído)"""
+        x, y, w, h = bbox
+        
+        # ✅ REGRA 1: Tamanho mínimo REDUZIDO (permite códigos distantes)
+        if w < 15 or h < 8:  # Bem menor que antes (era 30x15)
+            return False
+        
+        # ✅ REGRA 2: Conteúdo mínimo (códigos reais têm pelo menos 3 caracteres)
+        if len(code_data) < 3:
+            return False
+        
+        # ✅ REGRA 3: Apenas caracteres imprimíveis (evita lixo binário)
+        if not all(32 <= ord(c) <= 126 for c in code_data):
+            return False
+        
+        # ✅ REGRA 4: Validação específica DataBar (causa do WARNING)
+        if code_type in ['DATABAR', 'DATABAR_EXP', 'RSS14', 'RSS_EXP']:
+            # DataBar DEVE ser numérico e ter comprimento razoável
+            if not code_data.isdigit() or len(code_data) < 10:
+                return False
+        
+        return True
     
     def detect_codes(self, frame: np.ndarray) -> List[Dict]:
-        """Detecta códigos 1D e 2D no frame com pré-processamento otimizado"""
+        """Detecta códigos 1D e 2D no frame com pré-processamento otimizado
+        
+        PIPELINE OTIMIZADO:
+        1. Detecção inicial (localiza códigos)
+        2. Recorte da região detectada
+        3. Retificação de perspectiva (corrige inclinação)
+        4. PDI completo na região retificada
+        5. Re-detecção com maior precisão
+        """
         codes = []
         
-        # ============ PIPELINE DE PDI COMPLETO ============
+        # ============ ETAPA 1: DETECÇÃO INICIAL (LOCALIZAÇÃO) ============
+        # Usa imagem em escala de cinza para localizar códigos rapidamente
+        gray_initial = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # ETAPA 1: CLAHE para equalização de contraste adaptativa
-        # Melhora detecção em iluminação irregular
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-        lab[:,:,0] = clahe.apply(lab[:,:,0])
-        enhanced_frame = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        detected_regions = []  # Armazena regiões detectadas para processamento
         
-        # ETAPA 2: Conversão para escala de cinza
-        # Reduz processamento e foca na luminosidade
-        gray = cv2.cvtColor(enhanced_frame, cv2.COLOR_BGR2GRAY)
-        
-        # ETAPA 3: Binarização adaptativa
-        # Essencial para códigos 1D (separa barras pretas de brancas)
-        # Usa Gaussian para lidar com variações de iluminação
-        binary = cv2.adaptiveThreshold(
-            gray, 255, 
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-            cv2.THRESH_BINARY, 
-            blockSize=11,  # Tamanho da vizinhança
-            C=2  # Constante subtraída da média
-        )
-        
-        # ETAPA 4: Remoção de ruído (morfologia)
-        # Remove pequenos artefatos que atrapalham detecção
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        denoised = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
-        
-        # ✅ CACHE: Salva imagens para miniaturas e debug
-        self.enhanced_frame_cache = enhanced_frame  # Com CLAHE
-        self.gray_frame_cache = gray  # Escala de cinza
-        self.binary_frame_cache = denoised  # Binarizada (MELHOR para miniaturas!)
-        
-        # ============ DETECÇÃO EM MÚLTIPLAS VERSÕES ============
-        
-        # Tenta detectar na imagem binarizada primeiro (melhor para 1D)
-        frames_to_try = [
-            ('binary', denoised),      # Prioridade: códigos 1D
-            ('enhanced', enhanced_frame),  # Backup: códigos 2D
-            ('gray', gray)             # Último recurso
-        ]
-        
-        detected_data = set()  # Evita duplicatas entre versões
-        
-        for frame_type, processed_frame in frames_to_try:
-            # Detecção com pyzbar
-            if PYZBAR_AVAILABLE:
+        # Detecção inicial rápida com pyzbar
+        if PYZBAR_AVAILABLE:
+            try:
+                import os
+                stderr_backup = sys.stderr
+                sys.stderr = open(os.devnull, 'w')
+                
                 try:
-                    decoded_objects = pyzbar.decode(processed_frame)
-                    for obj in decoded_objects:
-                        data_key = obj.data.decode('utf-8')
-                        if data_key not in detected_data:
-                            detected_data.add(data_key)
-                            x, y, w, h = obj.rect
-                            codes.append({
-                                'type': obj.type,
-                                'data': data_key,
-                                'bbox': (x, y, w, h),
-                                'points': obj.polygon,
-                                'detected_on': frame_type  # Para debug
-                            })
-                except Exception:
-                    pass
+                    decoded_objects = pyzbar.decode(gray_initial)
+                finally:
+                    sys.stderr.close()
+                    sys.stderr = stderr_backup
+                
+                for obj in decoded_objects:
+                    try:
+                        data_key = obj.data.decode('utf-8', errors='ignore')
+                        x, y, w, h = obj.rect
+                        
+                        # Valida se não é ruído
+                        if not self.is_valid_code(obj.type, data_key, (x, y, w, h)):
+                            continue
+                        
+                        # Armazena região para processamento refinado
+                        detected_regions.append({
+                            'type': obj.type,
+                            'data': data_key,
+                            'bbox': (x, y, w, h),
+                            'polygon': obj.polygon,
+                            'method': 'initial'
+                        })
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+        
+        # ============ ETAPA 2: PROCESSAMENTO REFINADO DAS REGIÕES ============
+        processed_codes = set()  # Evita duplicatas
+        
+        for region in detected_regions:
+            x, y, w, h = region['bbox']
+            polygon = region['polygon']
             
-            # Detecção com pylibdmtx (DataMatrix) - só tenta em enhanced/gray
-            if PYLIBDMTX_AVAILABLE and frame_type != 'binary':
-                try:
-                    decoded_dm = pylibdmtx.decode(processed_frame, timeout=50)
-                    for obj in decoded_dm:
-                        data_key = obj.data.decode('utf-8')
-                        if data_key not in detected_data:
-                            detected_data.add(data_key)
-                            x, y, w, h = obj.rect
-                            codes.append({
-                                'type': 'DATAMATRIX',
-                                'data': data_key,
-                                'bbox': (x, y, w, h),
-                                'points': obj.polygon,
-                                'detected_on': frame_type
-                            })
-                except:
-                    pass
+            # ✅ MARGEM DE SEGURANÇA: Expande região em 20% para não cortar bordas
+            margin_x = int(w * 0.2)
+            margin_y = int(h * 0.2)
+            
+            x1 = max(0, x - margin_x)
+            y1 = max(0, y - margin_y)
+            x2 = min(frame.shape[1], x + w + margin_x)
+            y2 = min(frame.shape[0], y + h + margin_y)
+            
+            # ✅ RECORTE da região detectada
+            roi = frame[y1:y2, x1:x2].copy()
+            
+            if roi.size == 0:
+                continue
+            
+            # ============ ETAPA 3: RETIFICAÇÃO DE PERSPECTIVA ============
+            try:
+                # Ajusta coordenadas do polígono para o ROI
+                polygon_adjusted = []
+                for point in polygon:
+                    px = point.x - x1
+                    py = point.y - y1
+                    polygon_adjusted.append([px, py])
+                
+                polygon_adjusted = np.array(polygon_adjusted, dtype=np.float32)
+                
+                # Calcula largura e altura do código retificado
+                # Usa a distância entre pontos para preservar proporções
+                width = int(max(
+                    np.linalg.norm(polygon_adjusted[0] - polygon_adjusted[1]),
+                    np.linalg.norm(polygon_adjusted[2] - polygon_adjusted[3])
+                ))
+                height = int(max(
+                    np.linalg.norm(polygon_adjusted[1] - polygon_adjusted[2]),
+                    np.linalg.norm(polygon_adjusted[3] - polygon_adjusted[0])
+                ))
+                
+                # ✅ TAMANHO MÍNIMO: Garante resolução suficiente para leitura
+                width = max(width, 100)
+                height = max(height, 50)
+                
+                # Pontos destino (retângulo perfeito)
+                dst_points = np.array([
+                    [0, 0],
+                    [width - 1, 0],
+                    [width - 1, height - 1],
+                    [0, height - 1]
+                ], dtype=np.float32)
+                
+                # ✅ MATRIZ DE TRANSFORMAÇÃO de perspectiva
+                matrix = cv2.getPerspectiveTransform(polygon_adjusted, dst_points)
+                
+                # ✅ RETIFICAÇÃO: Corrige distorção angular
+                rectified = cv2.warpPerspective(roi, matrix, (width, height))
+                
+                # Armazena imagem retificada original (para miniaturas)
+                rectified_original = rectified.copy()
+                
+            except Exception as e:
+                # Se retificação falhar, usa ROI original
+                print(f"⚠️ Retificação falhou: {e}")
+                rectified = roi
+                rectified_original = roi.copy()
+            
+            # ============ ETAPA 4: PIPELINE DE PDI NA REGIÃO RETIFICADA ============
+            
+            # 4.1: CLAHE (equalização adaptativa)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            lab = cv2.cvtColor(rectified, cv2.COLOR_BGR2LAB)
+            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+            enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            
+            # 4.2: Escala de cinza
+            gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+            
+            # 4.3: Binarização adaptativa (CRÍTICO para códigos 1D)
+            binary = cv2.adaptiveThreshold(
+                gray, 255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                blockSize=11,
+                C=2
+            )
+            
+            # 4.4: Remoção de ruído
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            denoised = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+            
+            # 4.5: Sharpening (aguça bordas para melhor leitura)
+            # Usa filtro Unsharp Mask
+            gaussian = cv2.GaussianBlur(gray, (0, 0), 2.0)
+            sharpened = cv2.addWeighted(gray, 1.5, gaussian, -0.5, 0)
+            
+            # ✅ CACHE das versões processadas
+            self.enhanced_frame_cache = enhanced
+            self.gray_frame_cache = sharpened
+            self.binary_frame_cache = denoised
+            
+            # ============ ETAPA 5: RE-DETECÇÃO COM ALTA PRECISÃO ============
+            
+            # Tenta detectar nas versões processadas (ordem de prioridade)
+            frames_to_try = [
+                ('binary', denoised),       # Melhor para códigos 1D
+                ('sharpened', sharpened),   # Melhor para detalhes finos
+                ('enhanced', enhanced),     # Melhor para códigos 2D
+            ]
+            
+            best_result = None
+            best_confidence = 0
+            
+            for frame_type, processed in frames_to_try:
+                if PYZBAR_AVAILABLE:
+                    try:
+                        import os
+                        stderr_backup = sys.stderr
+                        sys.stderr = open(os.devnull, 'w')
+                        
+                        try:
+                            refined_objects = pyzbar.decode(processed)
+                        finally:
+                            sys.stderr.close()
+                            sys.stderr = stderr_backup
+                        
+                        for obj in refined_objects:
+                            try:
+                                refined_data = obj.data.decode('utf-8', errors='ignore')
+                                
+                                # Valida resultado
+                                if len(refined_data) < 3:
+                                    continue
+                                
+                                # ✅ CRITÉRIO DE CONFIANÇA: Prefere detecções com maior área
+                                confidence = obj.rect.width * obj.rect.height
+                                
+                                if confidence > best_confidence:
+                                    best_confidence = confidence
+                                    best_result = {
+                                        'type': obj.type,
+                                        'data': refined_data,
+                                        'bbox': region['bbox'],
+                                        'points': region['polygon'],
+                                        'detected_on': f'refined_{frame_type}',
+                                        # ✅ ARMAZENA TODAS AS VERSÕES PROCESSADAS
+                                        'rectified_original': rectified_original,  # Original retificada
+                                        'rectified_enhanced': enhanced,            # Com CLAHE
+                                        'rectified_gray': sharpened,               # Escala de cinza aguçada
+                                        'rectified_binary': denoised               # Binarizada
+                                    }
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+            
+            # Se encontrou resultado refinado, adiciona
+            if best_result:
+                code_key = f"{best_result['type']}:{best_result['data']}"
+                if code_key not in processed_codes:
+                    processed_codes.add(code_key)
+                    codes.append(best_result)
+        
+        # ============ FALLBACK: Se não detectou nada, tenta no frame completo ============
+        if len(codes) == 0:
+            # Pipeline PDI no frame completo (como backup)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+            enhanced_frame = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            
+            gray = cv2.cvtColor(enhanced_frame, cv2.COLOR_BGR2GRAY)
+            
+            binary = cv2.adaptiveThreshold(
+                gray, 255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                blockSize=11,
+                C=2
+            )
+            
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            denoised = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+            
+            # Cache para miniaturas
+            self.enhanced_frame_cache = enhanced_frame
+            self.gray_frame_cache = gray
+            self.binary_frame_cache = denoised
+            
+            # Tenta detectar
+            frames_to_try = [
+                ('binary', denoised),
+                ('enhanced', enhanced_frame),
+                ('gray', gray)
+            ]
+            
+            detected_data = set()
+            
+            for frame_type, processed_frame in frames_to_try:
+                if PYZBAR_AVAILABLE:
+                    try:
+                        import os
+                        stderr_backup = sys.stderr
+                        sys.stderr = open(os.devnull, 'w')
+                        
+                        try:
+                            decoded_objects = pyzbar.decode(processed_frame)
+                        finally:
+                            sys.stderr.close()
+                            sys.stderr = stderr_backup
+                        
+                        for obj in decoded_objects:
+                            try:
+                                data_key = obj.data.decode('utf-8', errors='ignore')
+                                x, y, w, h = obj.rect
+                                
+                                if not self.is_valid_code(obj.type, data_key, (x, y, w, h)):
+                                    continue
+                                
+                                if data_key not in detected_data:
+                                    detected_data.add(data_key)
+                                    # Recorta região do código
+                                    code_roi = frame[y:y+h, x:x+w].copy()
+
+                                    codes.append({
+                                        'type': obj.type,
+                                        'data': data_key,
+                                        'bbox': (x, y, w, h),
+                                        'points': obj.polygon,
+                                        'detected_on': f'fullframe_{frame_type}',
+                                        # ✅ Adiciona versões processadas da região recortada
+                                        'rectified_original': code_roi,
+                                        'rectified_enhanced': enhanced_frame[y:y+h, x:x+w].copy(),
+                                        'rectified_gray': gray[y:y+h, x:x+w].copy(),
+                                        'rectified_binary': denoised[y:y+h, x:x+w].copy()
+                                    })
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
         
         return codes
-    
+
     def apply_software_boost(self, frame: np.ndarray) -> np.ndarray:
         """Aplica boost de software (ganho digital)"""
         self.params_mutex.lock()
@@ -343,11 +578,18 @@ class CameraThread(QThread):
             # Detecta códigos
             codes = self.detect_codes(frame)
 
-            # ✅ Pega o frame processado que foi usado na detecção
-            processed_frame = self.enhanced_frame_cache if hasattr(self, 'enhanced_frame_cache') else frame
+            # ✅ Escolhe a imagem baseado no modo selecionado
+            if self.thumbnail_mode == "Binarizada" and hasattr(self, 'binary_frame_cache'):
+                processed_frame = self.binary_frame_cache
+            elif self.thumbnail_mode == "Escala de Cinza" and hasattr(self, 'gray_frame_cache'):
+                processed_frame = self.gray_frame_cache
+            elif hasattr(self, 'enhanced_frame_cache'):
+                processed_frame = self.enhanced_frame_cache
+            else:
+                processed_frame = frame
 
-            # Se boost está ativado, aplica também no frame processado
-            if boost_enabled:
+            # Se boost está ativado, aplica (exceto em binarizada que já é P&B)
+            if boost_enabled and self.thumbnail_mode != "Binarizada":
                 processed_frame = self.apply_software_boost(processed_frame)
                         
             # Desenha retângulos e legendas
@@ -360,19 +602,55 @@ class CameraThread(QThread):
                 cv2.putText(display_frame, label, (x, y - 10),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                 
-                # ✅ Miniatura usa imagem PROCESSADA
-                code_image = processed_frame[y:y+h, x:x+w].copy()
-                
+                # ✅ PRIORIZA imagem retificada ESPECÍFICA do código
+                if 'rectified_binary' in code:
+                    # Tem versões retificadas disponíveis
+                    if self.thumbnail_mode == "Binarizada":
+                        code_image = code.get('rectified_binary', code.get('rectified_original')).copy()
+                    elif self.thumbnail_mode == "Escala de Cinza":
+                        code_image = code.get('rectified_gray', code.get('rectified_original')).copy()
+                    else:  # Enhanced (CLAHE)
+                        code_image = code.get('rectified_enhanced', code.get('rectified_original')).copy()
+                    
+                    # Aplica boost se ativo (exceto em binarizada)
+                    if boost_enabled and self.thumbnail_mode != "Binarizada":
+                        code_image = self.apply_software_boost(code_image)
+                        
+                elif 'rectified_image' in code:
+                    # Fallback: usa rectified_image antiga (compatibilidade)
+                    code_image = code['rectified_image'].copy()
+                    
+                    if boost_enabled:
+                        code_image = self.apply_software_boost(code_image)
+                    
+                    # Aplica boost se ativo (exceto em binarizada)
+                    if boost_enabled and self.thumbnail_mode != "Binarizada":
+                        code_image = self.apply_software_boost(code_image)
+                else:
+                    # Fallback: recorta do frame processado (método antigo)
+                    x, y, w, h = code['bbox']
+                    if self.thumbnail_mode == "Binarizada" and hasattr(self, 'binary_frame_cache'):
+                        code_image = self.binary_frame_cache[y:y+h, x:x+w].copy()
+                    elif self.thumbnail_mode == "Escala de Cinza" and hasattr(self, 'gray_frame_cache'):
+                        code_image = self.gray_frame_cache[y:y+h, x:x+w].copy()
+                    elif hasattr(self, 'enhanced_frame_cache'):
+                        code_image = self.enhanced_frame_cache[y:y+h, x:x+w].copy()
+                    else:
+                        code_image = processed_frame[y:y+h, x:x+w].copy()
+                    
+                    # Aplica boost se ativo
+                    if boost_enabled and self.thumbnail_mode != "Binarizada":
+                        code_image = self.apply_software_boost(code_image)
+
                 # Emite sinal de código detectado (evita duplicatas)
                 code_key = f"{code['type']}:{code['data']}"
                 if not self.is_duplicate_detection(code_key):
                     self.recent_detections.append(code_key)
                     
-                    code_image = frame[y:y+h, x:x+w].copy()
                     self.code_detected.emit({
                         'type': code['type'],
                         'data': code['data'],
-                        'image': code_image,
+                        'image': code_image,  # ✅ Agora usa imagem retificada + PDI
                         'bbox': code['bbox'],
                         'timestamp': datetime.now().strftime("%H:%M:%S.%f")[:-3]
                     })
@@ -434,6 +712,10 @@ class MainWindow(QMainWindow):
         # Setup UI
         self.setup_ui()
         self.list_cameras()
+
+    def update_thumbnail_mode(self, mode: str):
+        """Atualiza o modo de miniatura na thread"""
+        self.camera_thread.thumbnail_mode = mode
         
     def setup_ui(self):
         """Configura a interface gráfica"""
@@ -522,18 +804,25 @@ class MainWindow(QMainWindow):
         self.check_fast_mode = QCheckBox("Modo rápido (processa 1 a cada 3 frames)")
         inspection_layout.addWidget(self.check_fast_mode, 2, 0, 1, 2)
         self.check_fast_mode.toggled.connect(self.toggle_fast_mode)
+
+        inspection_layout.addWidget(QLabel("Tipo de miniatura:"), 3, 0)
+        self.combo_thumbnail_mode = QComboBox()
+        self.combo_thumbnail_mode.addItems(["Binarizada", "Enhanced (CLAHE)", "Escala de Cinza"])
+        self.combo_thumbnail_mode.setCurrentIndex(1)  # Default: Enhanced
+        self.combo_thumbnail_mode.currentTextChanged.connect(self.update_thumbnail_mode)
+        inspection_layout.addWidget(self.combo_thumbnail_mode, 3, 1)
         
         self.btn_start_inspection = QPushButton("▶️ Iniciar Inspeção")
         self.btn_start_inspection.clicked.connect(self.start_inspection)
         self.btn_start_inspection.setStyleSheet("font-weight: bold; padding: 10px; background-color: #4CAF50; color: white;")
         self.btn_start_inspection.setEnabled(False)
-        inspection_layout.addWidget(self.btn_start_inspection, 3, 0, 1, 2)
+        inspection_layout.addWidget(self.btn_start_inspection, 4, 0, 1, 2)
         
         self.btn_stop_inspection = QPushButton("⏹️ Finalizar Inspeção")
         self.btn_stop_inspection.clicked.connect(self.stop_inspection)
         self.btn_stop_inspection.setStyleSheet("font-weight: bold; padding: 10px; background-color: #f44336; color: white;")
         self.btn_stop_inspection.setEnabled(False)
-        inspection_layout.addWidget(self.btn_stop_inspection, 4, 0, 1, 2)
+        inspection_layout.addWidget(self.btn_stop_inspection, 5, 0, 1, 2)
         
         inspection_group.setLayout(inspection_layout)
         left_layout.addWidget(inspection_group)
@@ -651,24 +940,47 @@ class MainWindow(QMainWindow):
         # ===== PAINEL DIREITO: Histórico e Miniaturas =====
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
-        right_panel.setMaximumWidth(350)
-        
-        right_layout.addWidget(QLabel("📋 Histórico de Códigos Detectados"))
-        
+        right_panel.setMinimumWidth(310)  # ✅ Reduzido de 350 para 310
+        right_panel.setMaximumWidth(310)
+        right_layout.setContentsMargins(5, 5, 5, 5)
+        right_layout.setSpacing(5)
+
+        # ✅ TÍTULO COMPACTO
+        history_label = QLabel("📋 Histórico")
+        history_label.setStyleSheet("font-weight: bold; font-size: 11px;")
+        right_layout.addWidget(history_label)
+
+        # ✅ HISTÓRICO MAIS COMPACTO
         self.history_list = QListWidget()
-        self.history_list.setMaximumHeight(200)
+        self.history_list.setMaximumHeight(120)  # Reduzido de 200 para 120
+        self.history_list.setStyleSheet("font-size: 9px;")
         right_layout.addWidget(self.history_list)
-        
-        right_layout.addWidget(QLabel("🖼️ Miniaturas dos Códigos Detectados"))
-        
+
+        # ✅ TÍTULO DAS MINIATURAS
+        thumbnails_label = QLabel("🖼️ Miniaturas (máx: 8)")
+        thumbnails_label.setStyleSheet("font-weight: bold; font-size: 11px;")
+        right_layout.addWidget(thumbnails_label)
+
+        # ✅ SCROLL AREA para as miniaturas
+        thumbnails_scroll = QScrollArea()
+        thumbnails_scroll.setWidgetResizable(True)
+        thumbnails_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        thumbnails_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        thumbnails_scroll.setMinimumHeight(600)  # Altura fixa para caber 8 códigos
+
         # Container de miniaturas com grid layout
         self.thumbnails_container = QWidget()
         self.thumbnails_layout = QGridLayout(self.thumbnails_container)
-        self.thumbnails_layout.setSpacing(10)
-        right_layout.addWidget(self.thumbnails_container)
-        
-        right_layout.addStretch()
+        self.thumbnails_layout.setSpacing(5)  # Espaçamento reduzido
+        self.thumbnails_layout.setContentsMargins(5, 5, 5, 5)
+        self.thumbnails_layout.setAlignment(Qt.AlignTop)  # ✅ Alinha no topo
+
+        thumbnails_scroll.setWidget(self.thumbnails_container)
+        right_layout.addWidget(thumbnails_scroll)
+
         main_layout.addWidget(right_panel)
+
+
     
     def create_slider(self, label: str, min_val: int, max_val: int, default: int, param: str) -> QVBoxLayout:
         """Cria um slider com label e valor"""
@@ -835,7 +1147,10 @@ class MainWindow(QMainWindow):
         self.current_thumbnails.clear()
     
     def add_thumbnail(self, img: np.ndarray, code_type: str, code_value: str, max_codes: int):
-        """Adiciona miniatura do código detectado em grid"""
+        """Adiciona miniatura do código detectado em grid com tamanho FIXO
+        
+        Layout otimizado para caber até 8 códigos em 2 colunas
+        """
         if img.size == 0:
             return
         
@@ -843,30 +1158,89 @@ class MainWindow(QMainWindow):
         row = index // 2
         col = index % 2
         
+        # ✅ TAMANHO REDUZIDO: 120x100 (era 150x130)
         thumb_widget = QWidget()
-        thumb_widget.setFixedSize(150, 180)
+        thumb_widget.setFixedSize(140, 140)  # Container compacto
         thumb_layout = QVBoxLayout(thumb_widget)
-        thumb_layout.setContentsMargins(5, 5, 5, 5)
+        thumb_layout.setContentsMargins(3, 3, 3, 3)
+        thumb_layout.setSpacing(3)
         
-        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb_img.shape
-        bytes_per_line = ch * w
-        qt_image = QImage(rgb_img.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        # ============ PROCESSAMENTO DA IMAGEM ============
+        
+        # Verifica se é escala de cinza ou colorida
+        if len(img.shape) == 2:
+            # Escala de cinza ou binarizada
+            h, w = img.shape
+            
+            # Converte para RGB para exibição no Qt
+            if img.dtype == np.uint8 and len(np.unique(img)) <= 2:
+                # Imagem binarizada (preto e branco puro)
+                rgb_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            else:
+                # Escala de cinza normal
+                rgb_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            
+            bytes_per_line = 3 * w
+            qt_format = QImage.Format_RGB888
+        else:
+            # Imagem colorida
+            h, w, ch = img.shape
+            rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            bytes_per_line = ch * w
+            qt_format = QImage.Format_RGB888
+        
+        # ============ CRIA QIMAGE ============
+        
+        qt_image = QImage(rgb_img.data, w, h, bytes_per_line, qt_format)
         pixmap = QPixmap.fromImage(qt_image)
         
+        # ✅ LABEL COM TAMANHO REDUZIDO: 120x100 pixels
         img_label = QLabel()
-        img_label.setFixedSize(140, 120)
-        img_label.setPixmap(pixmap.scaled(140, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        img_label.setFixedSize(120, 100)
         img_label.setAlignment(Qt.AlignCenter)
-        img_label.setStyleSheet("border: 2px solid #4CAF50; background-color: white;")
+        
+        # ✅ ESCALA para preencher exatamente o espaço
+        scaled_pixmap = pixmap.scaled(
+            120, 100,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
+        
+        img_label.setPixmap(scaled_pixmap)
+        
+        # ✅ BORDA VERDE + FUNDO BRANCO (mais fina)
+        img_label.setStyleSheet("""
+            border: 2px solid #4CAF50;
+            background-color: white;
+            padding: 1px;
+        """)
+        
         thumb_layout.addWidget(img_label)
         
-        text_label = QLabel(f"{code_type}\n{code_value}")
+        # ============ TEXTO COMPACTO ============
+        
+        # Trunca texto longo
+        display_text = code_value
+        if len(display_text) > 15:
+            display_text = display_text[:12] + "..."
+        
+        text_label = QLabel(f"{code_type}\n{display_text}")
         text_label.setAlignment(Qt.AlignCenter)
         text_label.setWordWrap(True)
-        text_label.setStyleSheet("font-size: 9px; color: #333; font-weight: bold;")
-        text_label.setMaximumHeight(50)
+        text_label.setFixedHeight(30)  # Reduzido de 50 para 30
+        text_label.setStyleSheet("""
+            font-size: 8px;
+            color: #333;
+            font-weight: bold;
+            background-color: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            padding: 2px;
+        """)
+        
         thumb_layout.addWidget(text_label)
+        
+        # ============ ADICIONA AO GRID ============
         
         self.thumbnails_layout.addWidget(thumb_widget, row, col)
         self.current_thumbnails.append(thumb_widget)
