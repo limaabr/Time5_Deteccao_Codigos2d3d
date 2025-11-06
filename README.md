@@ -665,22 +665,12 @@ Contribuições são bem-vindas! Para contribuir:
 
 Este projeto está sob a licença MIT. Veja o arquivo [LICENSE](LICENSE) para mais detalhes.
 
----
-
-## 👥 Autores
-
-**Time 5:**
-- Brenda Lima Cezar
-- Fábio André da Frota Lima
-- Luis Gustavo Corrêa
-- Helmer Araujo Rodrigues
-- Henrique da Rocha Andrade
 
 ---
 
 ## 📞 Suporte
 
-Para reportar bugs ou sugerir melhorias, abra uma [Issue](https://github.com/seu-usuario/detector-codigos/issues).
+Para reportar bugs ou sugerir melhorias, abra uma [Issue](https://github.com/limaabr/Time5_Deteccao_Codigos2d3d/issues).
 
 ---
 
