@@ -22,8 +22,7 @@ Python 3.10+
 6. [Arquitetura do Sistema](#-arquitetura-do-sistema)
 7. [Guia de Uso](#-guia-de-uso)
 8. [Parâmetros e Configurações](#-parâmetros-e-configurações)
-9. [Troubleshooting](#-troubleshooting)
-10. [Licença](#-licença)
+
 
 ---
 
@@ -638,13 +637,13 @@ Retificada → Enhanced → Escala de Cinza → Sharpening
 
 ## 📁 Estrutura de Arquivos
 ```
-detector-codigos/
-├── detector_codigos.py      # Código principal
-├── requirements.txt          # Dependências Python
-├── README.md                # Esta documentação
-├── modelo1.json             # Configuração salva (exemplo)
-├── modelo2.json             # Outra configuração
-└── LICENSE                  # Licença do projeto
+Desafio5_CodeDetect_2D3D/
+├── Desafio5_CodeDetect_2D3D_v6.py      # Código principal
+├── requirements.txt                    # Dependências Python
+├── README.md                           # Esta documentação
+├── GUIA DETALHADO PARAMETROS.md        # Guia de Parâmetros  
+├── modelo1.json                        # Configuração salva (se gerada)
+└── GUIA RÁPIDO DE TROUBLESHOOTING      # Guia de Troubleshooting
 ```
 
 ---
@@ -658,19 +657,6 @@ Contribuições são bem-vindas! Para contribuir:
 3. Commit suas mudanças (`git commit -m 'Adiciona nova funcionalidade'`)
 4. Push para a branch (`git push origin feature/nova-funcionalidade`)
 5. Abra um Pull Request
-
----
-
-## 📝 Licença
-
-Este projeto está sob a licença MIT. Veja o arquivo [LICENSE](LICENSE) para mais detalhes.
-
-
----
-
-## 📞 Suporte
-
-Para reportar bugs ou sugerir melhorias, abra uma [Issue](https://github.com/limaabr/Time5_Deteccao_Codigos2d3d/issues).
 
 ---
 
@@ -693,6 +679,5 @@ Para reportar bugs ou sugerir melhorias, abra uma [Issue](https://github.com/lim
 
 ---
 
-**Versão:** 6.0  
 **Última Atualização:** 2024  
-**Status:** ✅ Produção
+**Status:** Em Produção
