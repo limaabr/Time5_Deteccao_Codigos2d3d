@@ -87,7 +87,7 @@ Sistema profissional de detecção e validação de códigos de barras (1D) e c�
 
 ### 1. Clonar o Repositório
 ```bash
-git clone https://github.com/seu-usuario/detector-codigos.git
+git clone https://github.com/limaabr/Time5_Deteccao_Codigos2d3d.git
 cd detector-codigos
 ```
 
@@ -131,7 +131,7 @@ python3 -c "import cv2, pyzbar, pylibdmtx; print('✅ Tudo OK!')"
 
 ### 6. Executar o Sistema
 ```bash
-python3 detector_codigos.py
+python3 Time5_Deteccao_Codigos2.py
 ```
 
 ---
@@ -245,7 +245,8 @@ O sistema utiliza um pipeline otimizado de **5 etapas** para máxima precisão n
 └──────────────────────┬─────────────────────────────────────────┘
                        │ (sinais/slots)
                        │
-┌──────────────────────▼─────────────────────────────────────────┐
+                       ▼
+┌────────────────────────────────────────────────────────────────┐
 │                      CameraThread                              │
 │  • QThread (processamento assíncrono)                          │
 │  • Captura de vídeo                                            │
