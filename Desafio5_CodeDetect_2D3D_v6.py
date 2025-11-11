@@ -205,7 +205,7 @@ class CameraThread(QThread):
         x, y, w, h = bbox
         
         # ✅ REGRA 1: Tamanho mínimo REDUZIDO (permite códigos distantes)
-        if w < 15 or h < 8:  # Bem menor que antes (era 30x15)
+        if w < 15 or h < 8:  # Bem menor que antes (era 30x15) 15*8
             return False
         
         # ✅ REGRA 2: Conteúdo mínimo (códigos reais têm pelo menos 3 caracteres)
