@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QLineEdit,
     QCheckBox, QSlider, QGroupBox, QScrollArea, QListWidget,
-    QSplitter, QFileDialog, QFrame, QGridLayout, QMessageBox
+    QSplitter, QFileDialog, QFrame, QGridLayout, QMessageBox, QSizePolicy 
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QMutex
 from PyQt5.QtGui import QImage, QPixmap, QFont, QIntValidator
@@ -914,9 +914,10 @@ class MainWindow(QMainWindow):
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
         
-        # Vídeo com tamanho fixo
+        # Vídeo responsível
         self.video_label = QLabel()
-        self.video_label.setFixedSize(640, 480)
+        self.video_label.setMinimumSize(640, 480)  # Tamanho mínimo  
+        self.video_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # ✅ EXPANDE
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setStyleSheet("background-color: black; border: 2px solid #555;")
         self.video_label.setScaledContents(False)
@@ -1117,7 +1118,10 @@ class MainWindow(QMainWindow):
         qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qt_image)
         
-        scaled_pixmap = pixmap.scaled(640, 480, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        # ESCALA BASEADA NO TAMANHO ATUAL DO QLabel (não mais fixo em 640x480)
+        label_size = self.video_label.size()
+        scaled_pixmap = pixmap.scaled(label_size.width(), label_size.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    
         self.video_label.setPixmap(scaled_pixmap)
     
     def on_code_detected(self, code_data: dict):
